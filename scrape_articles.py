@@ -5,6 +5,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 import newspaper
+import redis
 
 ARTICLE_KEY = 'article:{id}'
 
@@ -63,10 +64,21 @@ def serialize_dict_data(d):
 
 
 def save_json_file(article_data, article_path):
-    filename = article_path + article_data['source'] + '_' + article_data['id'] + '.json'
+    filename = article_path + article_data['source'] + '.json'
+    with open(filename, 'w+') as fp:
+        if not fp.read(1):
+            data = {
+                'results':  [article_data]
+            }
+            json.dump(data, fp)
+        else:
+            json_data = json.loads(fp)
+            json_data['results'] = json_data['results'] + [article_data]
+            json.dump(article_data, fp)
 
-    with open(filename, 'w') as fp:
-        json.dump(article_data, fp)
+
+def get_redis_connection():
+    return redis.Redis().from_url('redis://127.0.0.1:6379/3')
 
 
 def main():
@@ -74,6 +86,7 @@ def main():
     output_dir = 'news_articles/' + str(current_date) + '/'
     os.makedirs(output_dir, exist_ok=True)
     news_list = get_file_data(os.path.join(BASE_DIR, 'input.txt'))
+    redis_con = get_redis_connection()
     for link in news_list:
         paper = newspaper.build(link.rstrip('\n'), memoize_articles=False)
         print(paper.url)
@@ -81,10 +94,18 @@ def main():
         newspaper.news_pool.join()
         for article in paper.articles:
             article_json = process_article(article)
+            serialize_dict_data(article_json)
             story_date = datetime.fromtimestamp(int(article_json['story_date'])).date()
             if story_date == current_date:
                 save_json_file(article_json, output_dir)
-            serialize_dict_data(article_json)
+            article_key = ARTICLE_KEY.format(id=article_json['id'])
+            if not redis_con.exists(article_key):
+                redis_con.hmset(article_key, mapping=article_json)
+                redis_con.zincrby(
+                    name=ARTICLE_SUMMARY_KEY.format(source=article_json['source']),
+                    amount=1,
+                    value=article_json['story_date'],
+                )
 
 
 if __name__ == "__main__":
