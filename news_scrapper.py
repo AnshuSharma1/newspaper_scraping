@@ -1,5 +1,5 @@
-import asyncio
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -9,9 +9,7 @@ from urllib.parse import urlparse
 import newspaper
 import redis
 
-ARTICLE_KEY = 'article:{id}'
-ARTICLE_SUMMARY_KEY = 'summary:{source}'
-ARTICLE_LIST = 'articles:zset:'
+from constants import ARTICLE_SUMMARY_KEY, ARTICLE_LIST, ARTICLE_KEY, REDIS_CONNECTION_URL
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -22,6 +20,7 @@ def get_file_data(file_path):
 
 
 async def get_hash(identifier):
+    """Unique identifier on basis of title, publish_date and topics"""
     return hashlib.md5(identifier.encode('utf8')).hexdigest()
 
 
@@ -30,7 +29,12 @@ async def get_domain_name(url):
     return result.netloc
 
 
-async def get_process_article_data(article):
+async def get_processed_article_data(article):
+    """
+    Fetches article data from the website, parse and does nlp and returns as json
+    :param article: Article object of the website
+    :return: JSON response of article data
+    """
     try:
         article.download()
         article.parse()
@@ -64,6 +68,7 @@ async def get_process_article_data(article):
 
 
 async def ingest_data(redis_con, article_key, data):
+    """Sequentially storing article data and increment the count date wise in redis"""
     if not redis_con.exists(article_key):
         redis_con.hmset(article_key, mapping=data)
         redis_con.zincrby(
@@ -80,49 +85,64 @@ async def ingest_data(redis_con, article_key, data):
 
 
 def save_json_file(article_data, dir_path):
+    """
+    Save json data of an articles w.r.t it's source and story date
+    :param article_data: JSON of article data
+    :param dir_path: Output dir to store
+    """
     current_date = str(datetime.now().date())
-    story_date = article_data['story_date']
-    if story_date == current_date:
-        output_path = dir_path + '/' + current_date + '/'
-        os.makedirs(output_path, exist_ok=True)
-        filename = output_path + article_data['source'] + '.json'
-
-        with open(filename, 'w+') as fp:
-            if not fp.read(1):
-                data = {
-                    'results':  [article_data]
+    output_path = os.path.join(dir_path, current_date)
+    os.makedirs(output_path, exist_ok=True)
+    filepath = os.path.join(output_path, article_data['source'] + '.json')
+    if not os.path.isfile(filepath):
+        with open(filepath, 'w') as fp:
+            json_data = {
+                'results': {
+                    article_data['id']: article_data
                 }
-                json.dump(data, fp)
-            else:
-                json_data = json.loads(fp)
-                json_data['results'] = json_data['results'] + [article_data]
-                json.dump(json_data, fp)
+            }
+            json.dump(json_data, fp)
+    else:
+        with open(filepath, 'r') as fp:
+            json_data = json.load(fp)
+            json_data['results'][article_data['id']] = article_data
+
+        with open(filepath, 'w') as fp2:
+            json.dump(json_data, fp2)
 
 
-@asyncio.coroutine
-def process_and_ingest(redis_con, article, dir_path):
-    article_json = yield from get_process_article_data(article)
-    if article_json:
-        save_json_file(article_json, dir_path)
-        article_key = ARTICLE_KEY.format(id=article_json['id'])
-        yield from ingest_data(redis_con, article_key, article_json)
+async def process_and_ingest(redis_con, article):
+    """Process data for a single article, save to dir and redis"""
+    article_data = await get_processed_article_data(article)
+    if article_data:
+        article_key = ARTICLE_KEY.format(id=article_data['id'])
+        await ingest_data(redis_con, article_key, article_data)
+
+    return article_data
 
 
 def get_redis_connection():
-    return redis.Redis().from_url('redis://127.0.0.1:6379/3')
+    return redis.Redis().from_url(REDIS_CONNECTION_URL)
 
 
-def scrape_articles(dir_name, source_name):
-    news_list = get_file_data(os.path.join(BASE_DIR, source_name))
+def scrape_articles(dir_name, source_file):
+    """
+    Scrape newspaper articles from dir_name
+    :param dir_name: Output directory to save json files to
+    :param source_file: Source file containing links of newspaper websites
+    """
+    news_list = get_file_data(os.path.join(BASE_DIR, source_file))
     redis_con = get_redis_connection()
-    futures = []
+    coroutines = []
     for link in news_list:
         paper = newspaper.build(link.rstrip('\n'), memoize_articles=False)
         paper.download()
         for article in paper.articles:
-            futures.append(process_and_ingest(redis_con, article, dir_name))
+            coroutines.append(process_and_ingest(redis_con, article))
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(asyncio.wait(futures))
+    tasks, _ = loop.run_until_complete(asyncio.wait(coroutines))
+    for task in tasks:
+        save_json_file(task.result(), dir_name)
 
 
 if __name__ == "__main__":
@@ -132,5 +152,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     output_dir = args.root_dir
-    source_file = args.source_list
-    scrape_articles(output_dir, source_file)
+    newspapers_file = args.source_list
+    scrape_articles(output_dir, newspapers_file)

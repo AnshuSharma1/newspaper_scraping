@@ -5,17 +5,16 @@ from urllib import parse as url_parse
 import redis
 from flask import Flask, request, jsonify
 
-from news_scrapper import ARTICLE_LIST
+from constants import ARTICLE_SUMMARY_KEY, ARTICLE_LIST, REDIS_CONNECTION_URL
 
 app = Flask(__name__)
 
 
 def get_redis_connection():
-    return redis.Redis().from_url('redis://127.0.0.1:6379/3', decode_responses=True)
+    return redis.Redis().from_url(REDIS_CONNECTION_URL, decode_responses=True)
 
 
 redis_con = get_redis_connection()
-ARTICLE_SUMMARY_KEY = 'summary:{source}'
 
 
 @app.route('/')
@@ -39,10 +38,12 @@ def _replace_query_param(url, key, val):
     return url_parse.urlunsplit((result.scheme, result.netloc, result.path, query, result.fragment))
 
 
-def _get_next_prev_url(url, page_no):
+def _get_next_prev_url(url, page_no, count, page_size):
     page_param = 'page_no'
-    next_link = _replace_query_param(url, page_param, page_no + 1)
-    prev_link = None
+    max_page_no = int(count / page_size) + int(count % page_size != 0)
+    next_link = prev_link = None
+    if max_page_no > page_no:
+        next_link = _replace_query_param(url, page_param, page_no + 1)
     if page_no > 1:
         prev_link = _replace_query_param(url, page_param, page_no - 1)
     return next_link, prev_link
@@ -50,6 +51,7 @@ def _get_next_prev_url(url, page_no):
 
 @app.route('/articles/')
 def articles():
+    """Show paginated articles list for specified page number and size"""
     page_no = int(request.args.get("page_no", 1))
     page_size = int(request.args.get("page_size", 10))
     result_count = redis_con.zcard(ARTICLE_LIST)
@@ -61,9 +63,10 @@ def articles():
         })
 
     article_list = redis_con.zrange(ARTICLE_LIST, start=start, end=start + page_size - 1)
-    next_, prev_ = _get_next_prev_url(url=request.url, page_no=page_no)
+    next_, prev_ = _get_next_prev_url(url=request.url, page_no=page_no,
+                                      count=result_count, page_size=page_size)
     response = OrderedDict([
-        ('count', page_size),
+        ('count', result_count),
         ('next', next_),
         ('previous', prev_),
         ('results', [])
@@ -77,7 +80,7 @@ def articles():
 
 @app.route('/stats/')
 def get_article_stats():
-    """How many articles captured by source on a date"""
+    """Article statistics : How many articles captured by source on a date"""
     source = request.args.get("source", None)
     start_date = request.args.get("start_date", None)
     end_date = request.args.get("end_date", None)
@@ -94,8 +97,10 @@ def get_article_stats():
         start_date = datetime.strptime(start_date, "%d-%m-%Y")
         start_count = redis_con.zscore(stats_key, str(start_date.date()))
         total_count += int(start_count) if start_count else 0
+        # If None end date get count for start date
         if end_date is not None:
             end_date = datetime.strptime(end_date, "%d-%m-%Y")
+            # Get count between given range
             while end_date > start_date:
                 cur_count = redis_con.zscore(stats_key, str(end_date.date()))
                 if cur_count:
