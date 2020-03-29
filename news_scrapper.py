@@ -102,9 +102,10 @@ def save_json_file(article_data, dir_path):
 @asyncio.coroutine
 def process_and_ingest(redis_con, article, dir_path):
     article_json = yield from get_process_article_data(article)
-    save_json_file(article_json, dir_path)
-    article_key = ARTICLE_KEY.format(id=article_json['id'])
-    yield from ingest_data(redis_con, article_key, article_json)
+    if article_json:
+        save_json_file(article_json, dir_path)
+        article_key = ARTICLE_KEY.format(id=article_json['id'])
+        yield from ingest_data(redis_con, article_key, article_json)
 
 
 def get_redis_connection():
@@ -115,10 +116,10 @@ def scrape_articles(dir_name, source_name):
     news_list = get_file_data(os.path.join(BASE_DIR, source_name))
     redis_con = get_redis_connection()
     futures = []
-    for link in news_list[:1]:
+    for link in news_list:
         paper = newspaper.build(link.rstrip('\n'), memoize_articles=False)
         paper.download()
-        for article in paper.articles[:1]:
+        for article in paper.articles:
             futures.append(process_and_ingest(redis_con, article, dir_name))
     loop = asyncio.get_event_loop()
     loop.run_until_complete(asyncio.wait(futures))
